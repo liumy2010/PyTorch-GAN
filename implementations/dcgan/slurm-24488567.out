@@ -1,0 +1,3 @@
+/home/gridsan/mliu/GAN/PyTorch-GAN/implementations/dcgan/dcgan.py:165: UserWarning: The torch.cuda.*DtypeTensor constructors are no longer recommended. It's best to use methods such as torch.tensor(data, dtype=*, device='cuda') to create tensors. (Triggered internally at ../torch/csrc/tensor/python_tensor.cpp:83.)
+  valid = Variable(Tensor(imgs.shape[0], 1).fill_(1.0), requires_grad=False)
+slurmstepd-d-9-11-2: error: *** JOB 24488567 ON d-9-11-2 CANCELLED AT 2023-12-14T13:36:39 ***

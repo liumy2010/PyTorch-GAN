@@ -2,6 +2,18 @@ import argparse
 import os
 import numpy as np
 import math
+import sys
+from pathlib import Path
+
+# Get the directory of the current file
+current_dir = Path(__file__).parent
+
+# Get the parent directory
+parent_dir = current_dir.parent
+
+# Add the parent directory to sys.path
+sys.path.append(str(parent_dir))
+from CopyPasteModel import CopyPaste
 
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
@@ -27,8 +39,11 @@ parser.add_argument("--latent_dim", type=int, default=100, help="dimensionality 
 parser.add_argument("--img_size", type=int, default=32, help="size of each image dimension")
 parser.add_argument("--channels", type=int, default=1, help="number of image channels")
 parser.add_argument("--sample_interval", type=int, default=400, help="interval between image sampling")
+
+parser.add_argument("--opt_level", type=int, default=5, help="how many optimistic steps")
 opt = parser.parse_args()
 print(opt)
+os.makedirs("images/%d"%opt.opt_level, exist_ok=True)
 
 cuda = True if torch.cuda.is_available() else False
 
@@ -42,9 +57,9 @@ def weights_init_normal(m):
         torch.nn.init.constant_(m.bias.data, 0.0)
 
 
-class Generator(nn.Module):
+class Generator(CopyPaste):
     def __init__(self):
-        super(Generator, self).__init__()
+        super().__init__()
 
         self.init_size = opt.img_size // 4
         self.l1 = nn.Sequential(nn.Linear(opt.latent_dim, 128 * self.init_size ** 2))
@@ -70,9 +85,9 @@ class Generator(nn.Module):
         return img
 
 
-class Discriminator(nn.Module):
+class Discriminator(CopyPaste):
     def __init__(self):
-        super(Discriminator, self).__init__()
+        super().__init__()
 
         def discriminator_block(in_filters, out_filters, bn=True):
             block = [nn.Conv2d(in_filters, out_filters, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
@@ -131,8 +146,11 @@ dataloader = torch.utils.data.DataLoader(
 )
 
 # Optimizers
-optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
-optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+#optimizer_G = torch.optim.Adam(generator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+#optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=opt.lr, betas=(opt.b1, opt.b2))
+
+optimizer_G = torch.optim.RMSprop(generator.parameters(), lr=opt.lr)
+optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr)
 
 Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 
@@ -142,7 +160,10 @@ Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 
 for epoch in range(opt.n_epochs):
     for i, (imgs, _) in enumerate(dataloader):
-
+        
+        if i % opt.opt_level == 0:
+            generator.copy()
+            discriminator.copy()
         # Adversarial ground truths
         valid = Variable(Tensor(imgs.shape[0], 1).fill_(1.0), requires_grad=False)
         fake = Variable(Tensor(imgs.shape[0], 1).fill_(0.0), requires_grad=False)
@@ -166,6 +187,8 @@ for epoch in range(opt.n_epochs):
         g_loss = adversarial_loss(discriminator(gen_imgs), valid)
 
         g_loss.backward()
+        generator.paste()
+        #generator.assert_check()
         optimizer_G.step()
 
         # ---------------------
@@ -180,6 +203,8 @@ for epoch in range(opt.n_epochs):
         d_loss = (real_loss + fake_loss) / 2
 
         d_loss.backward()
+        discriminator.paste()
+        #discriminator.assert_check()
         optimizer_D.step()
 
         print(
@@ -189,4 +214,4 @@ for epoch in range(opt.n_epochs):
 
         batches_done = epoch * len(dataloader) + i
         if batches_done % opt.sample_interval == 0:
-            save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+            save_image(gen_imgs.data[:25], "images/%d/%d.png" % (opt.opt_level, batches_done), nrow=5, normalize=True)

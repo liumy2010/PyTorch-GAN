@@ -4,6 +4,18 @@ import numpy as np
 import math
 import sys
 
+from pathlib import Path
+
+# Get the directory of the current file
+current_dir = Path(__file__).parent
+
+# Get the parent directory
+parent_dir = current_dir.parent
+
+# Add the parent directory to sys.path
+sys.path.append(str(parent_dir))
+from CopyPasteModel import CopyPaste
+
 import torchvision.transforms as transforms
 from torchvision.utils import save_image
 
@@ -14,8 +26,6 @@ from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-
-os.makedirs("images", exist_ok=True)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--n_epochs", type=int, default=200, help="number of epochs of training")
@@ -28,17 +38,25 @@ parser.add_argument("--channels", type=int, default=1, help="number of image cha
 parser.add_argument("--n_critic", type=int, default=5, help="number of training steps for discriminator per iter")
 parser.add_argument("--clip_value", type=float, default=0.01, help="lower and upper clip value for disc. weights")
 parser.add_argument("--sample_interval", type=int, default=400, help="interval betwen image samples")
+
+parser.add_argument("--tau", type=float, default=0.0, help="regularization coefficient")
+parser.add_argument("--sling", type=float, default=1.0, help="regularization coefficient")
+parser.add_argument("--opt_level", type=int, default=100, help="how many optimistic steps")
 opt = parser.parse_args()
 print(opt)
+tau = opt.tau
+
+os.makedirs("images", exist_ok=True)
+image_dir = "images/level=%s_sling=%s_tau=%s"%(str(opt.opt_level), str(opt.sling), str(opt.tau))+"/"
+os.makedirs(image_dir, exist_ok=True)
 
 img_shape = (opt.channels, opt.img_size, opt.img_size)
 
 cuda = True if torch.cuda.is_available() else False
 
-
-class Generator(nn.Module):
+class Generator(CopyPaste):
     def __init__(self):
-        super(Generator, self).__init__()
+        super().__init__()
 
         def block(in_feat, out_feat, normalize=True):
             layers = [nn.Linear(in_feat, out_feat)]
@@ -62,9 +80,9 @@ class Generator(nn.Module):
         return img
 
 
-class Discriminator(nn.Module):
+class Discriminator(CopyPaste):
     def __init__(self):
-        super(Discriminator, self).__init__()
+        super().__init__()
 
         self.model = nn.Sequential(
             nn.Linear(int(np.prod(img_shape)), 512),
@@ -72,6 +90,7 @@ class Discriminator(nn.Module):
             nn.Linear(512, 256),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Linear(256, 1),
+            #nn.Sigmoid()
         )
 
     def forward(self, img):
@@ -89,10 +108,11 @@ if cuda:
     discriminator.cuda()
 
 # Configure data loader
-os.makedirs("../../data/mnist", exist_ok=True)
+os.makedirs("../../data/cifar10", exist_ok=True)
 dataloader = torch.utils.data.DataLoader(
-    datasets.MNIST(
-        "../../data/mnist",
+    datasets.CIFAR10(
+        "../../data/cifar10",
+        #classes=['classroom_train'],
         train=True,
         download=True,
         transform=transforms.Compose([transforms.ToTensor(), transforms.Normalize([0.5], [0.5])]),
@@ -102,8 +122,9 @@ dataloader = torch.utils.data.DataLoader(
 )
 
 # Optimizers
-optimizer_G = torch.optim.RMSprop(generator.parameters(), lr=opt.lr)
-optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr)
+
+optimizer_G = torch.optim.RMSprop(generator.parameters(), lr=opt.lr, weight_decay=0.0001)#torch.optim.RMSprop(generator.parameters(), lr=opt.lr)
+optimizer_D = torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr, weight_decay=0.0001)#torch.optim.RMSprop(discriminator.parameters(), lr=opt.lr)
 
 Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 
@@ -112,11 +133,17 @@ Tensor = torch.cuda.FloatTensor if cuda else torch.FloatTensor
 # ----------
 
 batches_done = 0
+with open('log/%s.out'%str(tau), 'w') as f:
+    print(opt, file=f)
 for epoch in range(opt.n_epochs):
 
     for i, (imgs, _) in enumerate(dataloader):
 
         # Configure input
+        if i % opt.opt_level == 0:
+            generator.copy()
+            discriminator.copy()
+        
         real_imgs = Variable(imgs.type(Tensor))
 
         # ---------------------
@@ -131,10 +158,17 @@ for epoch in range(opt.n_epochs):
         # Generate a batch of images
         fake_imgs = generator(z).detach()
         # Adversarial loss
-        loss_D = -torch.mean(discriminator(real_imgs)) + torch.mean(discriminator(fake_imgs))
+        real_loss = discriminator(real_imgs)
+        fake_loss = discriminator(fake_imgs)
+        loss_D = -torch.mean(real_loss - 0.5 * tau * (real_loss**2)) + torch.mean(fake_loss + 0.5 * tau * (fake_loss ** 2))
+        #loss_D = -torch.mean(torch.log(real_loss)) - torch.mean(torch.log(1.0 - fake_loss))
+        no_reg_loss_D = -torch.mean(real_loss) + torch.mean(fake_loss)
 
+        loss_D += discriminator.Get_Distance() * opt.sling * 0.5 #####
         loss_D.backward()
+        #discriminator.paste()
         optimizer_D.step()
+        #discriminator.add_sling(opt.lr, opt.sling)
 
         # Clip weights of discriminator
         for p in discriminator.parameters():
@@ -152,10 +186,17 @@ for epoch in range(opt.n_epochs):
             # Generate a batch of images
             gen_imgs = generator(z)
             # Adversarial loss
-            loss_G = -torch.mean(discriminator(gen_imgs))
+            fake_loss = discriminator(gen_imgs)
+
+            loss_G = -torch.mean(fake_loss - 0.5 * tau * (fake_loss**2))
+            #loss_G = torch.mean(torch.log(1.0 - fake_loss))
+            loss_G += generator.Get_Distance() * opt.sling * 0.5
 
             loss_G.backward()
+            #generator.paste()
             optimizer_G.step()
+
+            #generator.add_sling(opt.lr, opt.sling)
 
             print(
                 "[Epoch %d/%d] [Batch %d/%d] [D loss: %f] [G loss: %f]"
@@ -163,5 +204,7 @@ for epoch in range(opt.n_epochs):
             )
 
         if batches_done % opt.sample_interval == 0:
-            save_image(gen_imgs.data[:25], "images/%d.png" % batches_done, nrow=5, normalize=True)
+            save_image(gen_imgs.data[:25], image_dir+"%d.png" % (batches_done), nrow=5, normalize=True)
+            with open('log/%s.out'%str(tau), 'a') as f:
+                print(batches_done, loss_D.item(), no_reg_loss_D.item(), file=f)
         batches_done += 1
